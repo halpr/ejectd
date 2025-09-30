@@ -4,7 +4,7 @@
 # Author: Filipe Soares
 # License: MIT
 # Version: 1.0.0
-# Description: Safe ejection tool for external drives
+# Description: Safe ejection tool for drives
 #
 
 # Colors for better readability
@@ -14,7 +14,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== External Drive Ejector ===${NC}\n"
+echo -e "${BLUE}=== Drive Ejector ===${NC}\n"
 
 # Get list of all drives except the main system drive
 # Exclude the drive that has the root partition mounted
@@ -30,12 +30,12 @@ for drive in "${all_drives[@]}"; do
 done
 
 if [ ${#drives[@]} -eq 0 ]; then
-    echo -e "${RED}No external drives found.${NC}"
+    echo -e "${RED}No drives found.${NC}"
     exit 1
 fi
 
 # Display available drives
-echo -e "${GREEN}Available external drives:${NC}\n"
+echo -e "${GREEN}Available drives:${NC}\n"
 for i in "${!drives[@]}"; do
     drive="${drives[$i]}"
     info=$(lsblk -no SIZE,MODEL "$drive" 2>/dev/null | head -1)
