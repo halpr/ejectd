@@ -1,0 +1,110 @@
+#!/bin/bash
+#
+# Drive Ejector
+# Author: Filipe Soares
+# License: MIT
+# Version: 1.0.0
+# Description: Safe ejection tool for external drives
+#
+
+# Colors for better readability
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}=== External Drive Ejector ===${NC}\n"
+
+# Get list of all drives except the main system drive
+# Exclude the drive that has the root partition mounted
+root_drive=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null)
+mapfile -t all_drives < <(lsblk -ndo NAME,TYPE | awk '$2=="disk" {print $1}')
+
+drives=()
+for drive in "${all_drives[@]}"; do
+    # Skip the root drive
+    if [ "$drive" != "$root_drive" ]; then
+        drives+=("/dev/$drive")
+    fi
+done
+
+if [ ${#drives[@]} -eq 0 ]; then
+    echo -e "${RED}No external drives found.${NC}"
+    exit 1
+fi
+
+# Display available drives
+echo -e "${GREEN}Available external drives:${NC}\n"
+for i in "${!drives[@]}"; do
+    drive="${drives[$i]}"
+    info=$(lsblk -no SIZE,MODEL "$drive" 2>/dev/null | head -1)
+    partitions=$(lsblk -no NAME "$drive" | tail -n +2)
+    mounted=$(lsblk -no MOUNTPOINT "$drive" | grep -v "^$" | tr '\n' ' ')
+    
+    echo -e "${YELLOW}[$((i+1))]${NC} $drive - $info"
+    
+    if [ -n "$mounted" ]; then
+        echo -e "    ${BLUE}Mounted at:${NC} $mounted"
+    else
+        echo -e "    ${BLUE}Not mounted${NC}"
+    fi
+    
+    if [ -n "$partitions" ]; then
+        echo -e "    ${BLUE}Partitions:${NC} $(echo $partitions | tr '\n' ' ')"
+    fi
+    echo
+done
+
+# Prompt user to select a drive
+echo -e "${GREEN}Select a drive to eject (1-${#drives[@]}) or 'q' to quit:${NC}"
+read -r choice
+
+if [[ "$choice" == "q" ]] || [[ "$choice" == "Q" ]]; then
+    echo "Cancelled."
+    exit 0
+fi
+
+# Validate input
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#drives[@]} ]; then
+    echo -e "${RED}Invalid selection.${NC}"
+    exit 1
+fi
+
+selected_drive="${drives[$((choice-1))]}"
+echo -e "\n${BLUE}Selected: $selected_drive${NC}\n"
+
+# Unmount all partitions on the drive
+echo -e "${YELLOW}Unmounting all partitions...${NC}"
+mapfile -t partitions < <(lsblk -lno NAME "$selected_drive" | tail -n +2)
+
+unmount_failed=false
+for part in "${partitions[@]}"; do
+    partition_path="/dev/$part"
+    mountpoint=$(lsblk -no MOUNTPOINT "$partition_path")
+    
+    if [ -n "$mountpoint" ]; then
+        echo "Unmounting $partition_path..."
+        if udisksctl unmount -b "$partition_path" 2>/dev/null; then
+            echo -e "${GREEN}✓ Unmounted $partition_path${NC}"
+        else
+            echo -e "${RED}✗ Failed to unmount $partition_path${NC}"
+            unmount_failed=true
+        fi
+    fi
+done
+
+if [ "$unmount_failed" = true ]; then
+    echo -e "\n${RED}Some partitions failed to unmount. Drive may still be in use.${NC}"
+    exit 1
+fi
+
+# Power off the drive
+echo -e "\n${YELLOW}Powering off the drive...${NC}"
+if udisksctl power-off -b "$selected_drive" 2>/dev/null; then
+    echo -e "${GREEN}✓ Drive $selected_drive safely ejected!${NC}"
+    echo -e "${GREEN}You can now safely remove the drive.${NC}"
+else
+    echo -e "${RED}✗ Failed to power off the drive.${NC}"
+    exit 1
+fi
