@@ -1,0 +1,165 @@
+#!/bin/bash
+#
+# Ejectd - External Drive Ejector
+# Author: Filipe Soares
+# GitHub: https://github.com/halpr
+# License: MIT
+# Version: 1.0.0
+# Description: Safe ejection tool for external drives
+
+# Colors and styling
+readonly RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m' CYAN='\033[0;36m' MAGENTA='\033[0;35m'
+readonly BOLD='\033[1m' DIM='\033[2m' NC='\033[0m'
+
+# Icons
+readonly ICON_DRIVE="💾" ICON_USB="🔌" ICON_MOUNTED="📌" ICON_UNMOUNTED="⭕"
+readonly ICON_SUCCESS="✅" ICON_ERROR="❌" ICON_WARNING="⚠️" ICON_EJECT="⏏️"
+
+# Display header
+show_header() {
+    clear
+    echo -e "\n${BOLD}${MAGENTA}Ejectd ${ICON_EJECT} External Drive Ejector${NC}"
+    echo -e "${DIM}Safe removal tool for external drives${NC}\n"
+}
+
+# Get drive info efficiently with single lsblk call
+get_drive_info() {
+    local drive=$1
+    # Single lsblk call to get all needed info at once
+    lsblk -no SIZE,MODEL,VENDOR,TRAN "$drive" 2>/dev/null | head -1
+}
+
+# Display drives
+show_drives() {
+    show_header
+    
+    # Get system drive once
+    local root_drive=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null)
+    
+    # Get all non-system drives in one call
+    mapfile -t drives < <(lsblk -ndo NAME,TYPE | awk -v rd="$root_drive" '$2=="disk" && $1!=rd {print "/dev/"$1}')
+
+    if [[ ${#drives[@]} -eq 0 ]]; then
+        echo -e "${RED}${ICON_ERROR} No external drives found.${NC}\n"
+        read -p "Press Enter to exit..."
+        exit 1
+    fi
+
+    echo -e "${BOLD}${GREEN}Available Drives:${NC}"
+    echo -e "${DIM}────────────────────────────────────────────────────────────${NC}\n"
+
+    for i in "${!drives[@]}"; do
+        local drive="${drives[$i]}"
+        
+        # Get all drive info in one call
+        read -r size_human model vendor tran <<< "$(get_drive_info "$drive")"
+        
+        # Build friendly name
+        local friendly_name="${vendor:+$vendor }${model:-Unknown Drive}"
+        [[ -z "$vendor" && -z "$model" ]] && friendly_name="Unknown Drive"
+        
+        # Get mount info efficiently
+        local mount_points=$(lsblk -no MOUNTPOINT "$drive" | grep -c '^/')
+        local mount_info="${DIM}${ICON_UNMOUNTED} Not mounted${NC}"
+        
+        if [[ $mount_points -gt 0 ]]; then
+            mount_info="${GREEN}${ICON_MOUNTED} Mounted${NC}"
+            [[ $mount_points -gt 3 ]] && mount_info+=" ($mount_points locations)"
+        fi
+        
+        # Connection type
+        local conn_icon="${ICON_USB}" conn_type="USB"
+        case "$tran" in
+            sata) conn_icon="💿"; conn_type="SATA" ;;
+            nvme) conn_icon="⚡"; conn_type="NVMe" ;;
+        esac
+        
+        # Display drive info
+        echo -e "${BOLD}${YELLOW}[$((i+1))]${NC} ${conn_icon} ${BOLD}${friendly_name}${NC}"
+        echo -e "    ${DIM}├─${NC} ${CYAN}Device:${NC} ${drive}"
+        echo -e "    ${DIM}├─${NC} ${CYAN}Size:${NC} ${size_human}"
+        echo -e "    ${DIM}├─${NC} ${CYAN}Type:${NC} ${conn_type}"
+        echo -e "    ${DIM}└─${NC} ${CYAN}Status:${NC} $mount_info"
+        
+        # Show mount points if mounted and count <= 3
+        if [[ $mount_points -gt 0 && $mount_points -le 3 ]]; then
+            lsblk -no MOUNTPOINT "$drive" | grep '^/' | head -3 | while read -r mp; do
+                echo -e "       ${DIM}→${NC} ${mp}"
+            done
+        fi
+        echo
+    done
+
+    echo -e "${DIM}────────────────────────────────────────────────────────────${NC}"
+}
+
+# Unmount drive
+unmount_drive() {
+    local selected_drive=$1
+    
+    show_header
+    echo -e "${BOLD}${YELLOW}${ICON_WARNING} Selected: $selected_drive${NC}\n"
+    echo -e "${CYAN}${ICON_DRIVE} Unmounting all partitions...${NC}\n"
+    
+    # Get all partitions at once
+    mapfile -t partitions < <(lsblk -lno NAME "$selected_drive" | tail -n +2)
+    
+    local unmount_failed=false
+    for part in "${partitions[@]}"; do
+        local partition_path="/dev/$part"
+        local mountpoint=$(lsblk -no MOUNTPOINT "$partition_path" 2>/dev/null)
+        
+        if [[ -n "$mountpoint" ]]; then
+            echo -e "  ${DIM}→${NC} Unmounting ${partition_path} (${mountpoint})..."
+            if udisksctl unmount -b "$partition_path" &>/dev/null; then
+                echo -e "    ${GREEN}${ICON_SUCCESS} Success${NC}"
+            else
+                echo -e "    ${RED}${ICON_ERROR} Failed${NC}"
+                unmount_failed=true
+            fi
+        fi
+    done
+    
+    if $unmount_failed; then
+        echo -e "\n${RED}${ICON_ERROR} Some partitions failed to unmount.${NC}"
+        echo -e "${YELLOW}${ICON_WARNING} The drive may still be in use.${NC}\n"
+        read -p "Press Enter to continue..."
+        return 1
+    fi
+    
+    # Power off the drive
+    echo -e "\n${CYAN}${ICON_EJECT} Powering off the drive...${NC}\n"
+    if udisksctl power-off -b "$selected_drive" &>/dev/null; then
+        echo -e "${GREEN}${ICON_SUCCESS} Drive $selected_drive has been safely ejected!${NC}"
+        echo -e "${GREEN}${ICON_SUCCESS} You can now safely remove the drive.${NC}\n"
+    else
+        echo -e "${RED}${ICON_ERROR} Failed to power off the drive.${NC}\n"
+    fi
+    
+    read -p "Press Enter to continue..."
+}
+
+# Main loop
+while true; do
+    show_drives
+    
+    echo -e "\n${BOLD}${CYAN}Options:${NC}"
+    echo -e "  ${YELLOW}[1-${#drives[@]}]${NC} Select a drive to eject"
+    echo -e "  ${YELLOW}[r]${NC} Refresh drive list"
+    echo -e "  ${YELLOW}[q]${NC} Quit\n"
+    read -p "$(echo -e "${BOLD}${GREEN}Your choice: ${NC}")" choice
+
+    case "${choice,,}" in
+        q) echo -e "\n${CYAN}Goodbye!${NC}"; exit 0 ;;
+        r) continue ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#drives[@]})); then
+                unmount_drive "${drives[$((choice-1))]}"
+            else
+                echo -e "\n${RED}${ICON_ERROR} Invalid selection.${NC}"
+                sleep 2
+            fi
+            ;;
+    esac
+done
